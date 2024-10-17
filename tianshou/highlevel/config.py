@@ -1,10 +1,7 @@
-import logging
 import multiprocessing
 from dataclasses import dataclass
 
-from sensai.util.string import ToStringMixin
-
-log = logging.getLogger(__name__)
+from tianshou.utils.string import ToStringMixin
 
 
 @dataclass
@@ -40,24 +37,16 @@ class SamplingConfig(ToStringMixin):
     an explanation of epoch semantics.
     """
 
-    batch_size: int | None = 64
+    batch_size: int = 64
     """for off-policy algorithms, this is the number of environment steps/transitions to sample
     from the buffer for a gradient update; for on-policy algorithms, its use is algorithm-specific.
     On-policy algorithms use the full buffer that was collected in the preceding collection step
     but they may use this parameter to perform the gradient update using mini-batches of this size
     (causing the gradient to be less accurate, a form of regularization).
-
-    ``batch_size=None`` means that the full buffer is used for the gradient update. This doesn't
-    make much sense for off-policy algorithms and is not recommended then. For on-policy or offline algorithms,
-    this means that the full buffer is used for the gradient update (no mini-batching), and
-    may make sense in some cases.
     """
 
     num_train_envs: int = -1
     """the number of training environments to use. If set to -1, use number of CPUs/threads."""
-
-    train_seed: int = 42
-    """the seed to use for the training environments."""
 
     num_test_envs: int = 1
     """the number of test environments to use"""
@@ -70,13 +59,10 @@ class SamplingConfig(ToStringMixin):
     """the total size of the sample/replay buffer, in which environment steps (transitions) are
     stored"""
 
-    step_per_collect: int | None = 2048
+    step_per_collect: int = 2048
     """
     the number of environment steps/transitions to collect in each collection step before the
     network update within each training step.
-
-    This is mutually exclusive with :attr:`episode_per_collect`, and one of the two must be set.
-
     Note that the exact number can be reached only if this is a multiple of the number of
     training environments being used, as each training environment will produce the same
     (non-zero) number of transitions.
@@ -87,20 +73,11 @@ class SamplingConfig(ToStringMixin):
     collected during training.
     """
 
-    episode_per_collect: int | None = None
-    """
-    the number of episodes to collect in each collection step before the network update within
-    each training step. If this is set, the number of environment steps collected in each
-    collection step is the sum of the lengths of the episodes collected.
-
-    This is mutually exclusive with :attr:`step_per_collect`, and one of the two must be set.
-    """
-
     repeat_per_collect: int | None = 1
     """
     controls, within one gradient update step of an on-policy algorithm, the number of times an
     actual gradient update is applied using the full collected dataset, i.e. if the parameter is
-    5, then the collected data shall be used five times to update the policy within the same
+    `n`, then the collected data shall be used five times to update the policy within the same
     training step.
 
     The parameter is ignored and may be set to None for off-policy and offline algorithms.
@@ -131,24 +108,11 @@ class SamplingConfig(ToStringMixin):
     """
 
     replay_buffer_ignore_obs_next: bool = False
-    """whether to ignore the `obs_next` field in the collected samples when storing them in the
-    buffer and instead use the one-in-the-future of `obs` as the next observation.
-    This can be useful for very large observations, like for Atari, in order to save RAM.
-
-    However, setting this to True **may introduce an error** at the last steps of episodes! Should
-    only be used in exceptional cases and only when you know what you are doing.
-    Currently only used in Atari examples and may be removed in the future!
-    """
 
     replay_buffer_save_only_last_obs: bool = False
-    """if True, for the case where the environment outputs stacked frames (e.g. because it
-    is using a `FrameStack` wrapper), save only the most recent frame so as not to duplicate
-    observations in buffer memory. Specifically, if the environment outputs observations `obs` with
-    shape (N, ...), only obs[-1] of shape (...) will be stored.
-    Frame stacking with a fixed number of frames can then be recreated at the buffer level by setting
-    :attr:`replay_buffer_stack_num`.
-
-    Note: Currently only used in Atari examples and may be removed in the future!
+    """if True, only the most recent frame is saved when appending to experiences rather than the
+    full stacked frames. This avoids duplicating observations in buffer memory. Set to False to
+    save stacked frames in full.
     """
 
     replay_buffer_stack_num: int = 1
@@ -156,37 +120,8 @@ class SamplingConfig(ToStringMixin):
     the number of consecutive environment observations to stack and use as the observation input
     to the agent for each time step. Setting this to a value greater than 1 can help agents learn
     temporal aspects (e.g. velocities of moving objects for which only positions are observed).
-
-    Note: it is recommended to do this stacking on the environment level by using something like
-    gymnasium's `FrameStack` instead. Setting this to larger than one in conjunction
-    with :attr:`replay_buffer_save_only_last_obs` means that
-    stacking will be recreated at the buffer level, which is more memory-efficient.
-
-    Currently only used in Atari examples and may be removed in the future!
     """
-
-    @property
-    def test_seed(self) -> int:
-        return self.train_seed + self.num_train_envs
 
     def __post_init__(self) -> None:
         if self.num_train_envs == -1:
             self.num_train_envs = multiprocessing.cpu_count()
-
-        if self.num_test_episodes == 0 and self.num_test_envs != 0:
-            log.warning(
-                f"Number of test episodes is set to 0, "
-                f"but number of test environments is ({self.num_test_envs}). "
-                f"This can cause unnecessary memory usage.",
-            )
-
-        if self.num_test_episodes != 0 and self.num_test_episodes % self.num_test_envs != 0:
-            log.warning(
-                f"Number of test episodes ({self.num_test_episodes} "
-                f"is not divisible by the number of test environments ({self.num_test_envs}). "
-                f"This can cause unnecessary memory usage, it is recommended to adjust this.",
-            )
-
-        assert (
-            sum([self.step_per_collect is not None, self.episode_per_collect is not None]) == 1
-        ), ("Only one of `step_per_collect` and `episode_per_collect` can be set.",)

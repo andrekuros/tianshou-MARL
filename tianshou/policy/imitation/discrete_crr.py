@@ -11,7 +11,6 @@ from tianshou.data import to_torch, to_torch_as
 from tianshou.data.types import RolloutBatchProtocol
 from tianshou.policy.base import TLearningRateScheduler
 from tianshou.policy.modelfree.pg import PGPolicy, PGTrainingStats
-from tianshou.utils.net.discrete import Actor, Critic
 
 
 @dataclass
@@ -27,9 +26,8 @@ TDiscreteCRRTrainingStats = TypeVar("TDiscreteCRRTrainingStats", bound=DiscreteC
 class DiscreteCRRPolicy(PGPolicy[TDiscreteCRRTrainingStats]):
     r"""Implementation of discrete Critic Regularized Regression. arXiv:2006.15134.
 
-    :param actor: the actor network following the rules:
-        If `self.action_type == "discrete"`: (`s_B` ->`action_values_BA`).
-        If `self.action_type == "continuous"`: (`s_B` -> `dist_input_BD`).
+    :param actor: the actor network following the rules in
+        :class:`~tianshou.policy.BasePolicy`. (s -> logits)
     :param critic: the action-value critic (i.e., Q function)
         network. (s -> Q(s, \*))
     :param optim: a torch.optim for optimizing the model.
@@ -57,8 +55,8 @@ class DiscreteCRRPolicy(PGPolicy[TDiscreteCRRTrainingStats]):
     def __init__(
         self,
         *,
-        actor: torch.nn.Module | Actor,
-        critic: torch.nn.Module | Critic,
+        actor: torch.nn.Module,
+        critic: torch.nn.Module,
         optim: torch.optim.Optimizer,
         action_space: gym.spaces.Discrete,
         discount_factor: float = 0.99,

@@ -4,10 +4,8 @@ from abc import ABC, abstractmethod
 from typing import Any, Generic, TypeVar, cast
 
 import gymnasium
-from sensai.util.string import ToStringMixin
 
 from tianshou.data import Collector, ReplayBuffer, VectorReplayBuffer
-from tianshou.data.collector import BaseCollector, CollectStats
 from tianshou.highlevel.config import SamplingConfig
 from tianshou.highlevel.env import Environments
 from tianshou.highlevel.module.actor import (
@@ -59,9 +57,9 @@ from tianshou.policy import (
     TD3Policy,
     TRPOPolicy,
 )
-from tianshou.policy.base import RandomActionPolicy
 from tianshou.trainer import BaseTrainer, OffpolicyTrainer, OnpolicyTrainer
 from tianshou.utils.net.common import ActorCritic
+from tianshou.utils.string import ToStringMixin
 
 CHECKPOINT_DICT_KEY_MODEL = "model"
 CHECKPOINT_DICT_KEY_OBS_RMS = "obs_rms"
@@ -95,14 +93,7 @@ class AgentFactory(ABC, ToStringMixin):
         self,
         policy: BasePolicy,
         envs: Environments,
-        reset_collectors: bool = True,
-    ) -> tuple[BaseCollector, BaseCollector]:
-        """:param policy:
-        :param envs:
-        :param reset_collectors: Whether to reset the collectors before returning them.
-            Setting to True means that the envs will be reset as well.
-        :return:
-        """
+    ) -> tuple[Collector, Collector]:
         buffer_size = self.sampling_config.buffer_size
         train_envs = envs.train_envs
         buffer: ReplayBuffer
@@ -121,16 +112,16 @@ class AgentFactory(ABC, ToStringMixin):
                 save_only_last_obs=self.sampling_config.replay_buffer_save_only_last_obs,
                 ignore_obs_next=self.sampling_config.replay_buffer_ignore_obs_next,
             )
-        train_collector = Collector[CollectStats](
-            policy,
-            train_envs,
-            buffer,
-            exploration_noise=True,
-        )
-        test_collector = Collector[CollectStats](policy, envs.test_envs)
-        if reset_collectors:
-            train_collector.reset()
-            test_collector.reset()
+        train_collector = Collector(policy, train_envs, buffer, exploration_noise=True)
+        test_collector = Collector(policy, envs.test_envs)
+        if self.sampling_config.start_timesteps > 0:
+            log.info(
+                f"Collecting {self.sampling_config.start_timesteps} initial environment steps before training (random={self.sampling_config.start_timesteps_random})",
+            )
+            train_collector.collect(
+                n_step=self.sampling_config.start_timesteps,
+                random=self.sampling_config.start_timesteps_random,
+            )
         return train_collector, test_collector
 
     def set_policy_wrapper_factory(
@@ -197,7 +188,6 @@ class OnPolicyAgentFactory(AgentFactory, ABC):
             batch_size=sampling_config.batch_size,
             step_per_collect=sampling_config.step_per_collect,
             save_best_fn=policy_persistence.get_save_best_fn(world),
-            save_checkpoint_fn=policy_persistence.get_save_checkpoint_fn(world),
             logger=world.logger,
             test_in_train=False,
             train_fn=train_fn,
@@ -251,11 +241,6 @@ class OffPolicyAgentFactory(AgentFactory, ABC):
         )
 
 
-class RandomActionAgentFactory(OnPolicyAgentFactory):
-    def _create_policy(self, envs: Environments, device: TDevice) -> RandomActionPolicy:
-        return RandomActionPolicy(envs.get_action_space())
-
-
 class PGAgentFactory(OnPolicyAgentFactory):
     def __init__(
         self,
@@ -284,14 +269,11 @@ class PGAgentFactory(OnPolicyAgentFactory):
                 optim_factory=self.optim_factory,
             ),
         )
-        dist_fn = self.actor_factory.create_dist_fn(envs)
-        assert dist_fn is not None
         return PGPolicy(
             actor=actor.module,
             optim=actor.optim,
             action_space=envs.get_action_space(),
             observation_space=envs.get_observation_space(),
-            dist_fn=dist_fn,
             **kwargs,
         )
 
@@ -347,7 +329,6 @@ class ActorCriticAgentFactory(
         kwargs["critic"] = actor_critic.critic
         kwargs["optim"] = actor_critic.optim
         kwargs["action_space"] = envs.get_action_space()
-        kwargs["dist_fn"] = self.actor_factory.create_dist_fn(envs)
         return kwargs
 
     def _create_policy(self, envs: Environments, device: TDevice) -> TPolicy:

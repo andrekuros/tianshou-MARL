@@ -9,7 +9,6 @@ import torch
 from tianshou.data import Batch, ReplayBuffer, to_numpy, to_torch_as
 from tianshou.data.batch import BatchProtocol
 from tianshou.data.types import (
-    ActBatchProtocol,
     BatchWithReturnsProtocol,
     ModelOutputBatchProtocol,
     ObsBatchProtocol,
@@ -17,7 +16,6 @@ from tianshou.data.types import (
 )
 from tianshou.policy import BasePolicy
 from tianshou.policy.base import TLearningRateScheduler, TrainingStats
-from tianshou.utils.net.common import Net
 
 
 @dataclass(kw_only=True)
@@ -36,7 +34,8 @@ class DQNPolicy(BasePolicy[TDQNTrainingStats], Generic[TDQNTrainingStats]):
     Implementation of Dueling DQN. arXiv:1511.06581 (the dueling DQN is
     implemented in the network side, not here).
 
-    :param model: a model following the rules (s -> action_values_BA)
+    :param model: a model following the rules in
+        :class:`~tianshou.policy.BasePolicy`. (s -> logits)
     :param optim: a torch.optim for optimizing the model.
     :param discount_factor: in [0, 1].
     :param estimation_step: the number of steps to look ahead.
@@ -60,7 +59,7 @@ class DQNPolicy(BasePolicy[TDQNTrainingStats], Generic[TDQNTrainingStats]):
     def __init__(
         self,
         *,
-        model: torch.nn.Module | Net,
+        model: torch.nn.Module,
         optim: torch.optim.Optimizer,
         # TODO: type violates Liskov substitution principle
         action_space: gym.spaces.Discrete,
@@ -118,10 +117,13 @@ class DQNPolicy(BasePolicy[TDQNTrainingStats], Generic[TDQNTrainingStats]):
         """Synchronize the weight for the target network."""
         self.model_old.load_state_dict(self.model.state_dict())
 
-    def _target_q(self, buffer: ReplayBuffer, indices: np.ndarray) -> torch.Tensor:
+    def _target_q(self, buffer: ReplayBuffer, indices: np.ndarray) -> torch.Tensor:        
         obs_next_batch = Batch(
             obs=buffer[indices].obs_next,
-            info=[None] * len(indices),
+            #KUR
+            #info=buffer[indices].obs_next[buffer.agent_ref].mask,
+            info=buffer.agent_ref
+            #info=[None] * len(indices),
         )  # obs_next: s_{t+n}
         result = self(obs_next_batch)
         if self._target:
@@ -201,12 +203,12 @@ class DQNPolicy(BasePolicy[TDQNTrainingStats], Generic[TDQNTrainingStats]):
         obs = batch.obs
         # TODO: this is convoluted! See also other places where this is done.
         obs_next = obs.obs if hasattr(obs, "obs") else obs
-        action_values_BA, hidden_BH = model(obs_next, state=state, info=batch.info)
-        q = self.compute_q_value(action_values_BA, getattr(obs, "mask", None))
+        logits, hidden = model(obs_next, state=state, info=batch.info)
+        q = self.compute_q_value(logits, getattr(obs, "mask", None))
         if self.max_action_num is None:
             self.max_action_num = q.shape[1]
-        act_B = to_numpy(q.argmax(dim=1))
-        result = Batch(logits=action_values_BA, act=act_B, state=hidden_BH)
+        act = to_numpy(q.max(dim=1)[1])
+        result = Batch(logits=logits, act=act, state=hidden)
         return cast(ModelOutputBatchProtocol, result)
 
     def learn(self, batch: RolloutBatchProtocol, *args: Any, **kwargs: Any) -> TDQNTrainingStats:
@@ -233,13 +235,11 @@ class DQNPolicy(BasePolicy[TDQNTrainingStats], Generic[TDQNTrainingStats]):
 
         return DQNTrainingStats(loss=loss.item())  # type: ignore[return-value]
 
-    _TArrOrActBatch = TypeVar("_TArrOrActBatch", bound="np.ndarray | ActBatchProtocol")
-
     def exploration_noise(
         self,
-        act: _TArrOrActBatch,
-        batch: ObsBatchProtocol,
-    ) -> _TArrOrActBatch:
+        act: np.ndarray | BatchProtocol,
+        batch: RolloutBatchProtocol,
+    ) -> np.ndarray | BatchProtocol:
         if isinstance(act, np.ndarray) and not np.isclose(self.eps, 0.0):
             bsz = len(act)
             rand_mask = np.random.rand(bsz) < self.eps

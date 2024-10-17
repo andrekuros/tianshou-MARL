@@ -25,7 +25,8 @@ TQRDQNTrainingStats = TypeVar("TQRDQNTrainingStats", bound=QRDQNTrainingStats)
 class QRDQNPolicy(DQNPolicy[TQRDQNTrainingStats], Generic[TQRDQNTrainingStats]):
     """Implementation of Quantile Regression Deep Q-Network. arXiv:1710.10044.
 
-    :param model: a model following the rules (s -> action_values_BA)
+    :param model: a model following the rules in
+        :class:`~tianshou.policy.BasePolicy`. (s -> logits)
     :param optim: a torch.optim for optimizing the model.
     :param action_space: Env's action space.
     :param discount_factor: in [0, 1].

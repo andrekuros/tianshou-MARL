@@ -190,13 +190,11 @@ class BaseVectorEnv:
             ), f"Cannot interact with environment {i} which is stepping now."
             assert i in self.ready_id, f"Can only interact with ready environments {self.ready_id}."
 
-    # TODO: for now, has to be kept in sync with reset in EnvPoolMixin
-    #  In particular, can't rename env_id to env_ids
     def reset(
         self,
-        env_id: int | list[int] | np.ndarray | None = None,
+        id: int | list[int] | np.ndarray | None = None,
         **kwargs: Any,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, dict | list[dict]]:
         """Reset the state of some envs and return initial observations.
 
         If id is None, reset the state of all the environments and return
@@ -204,14 +202,14 @@ class BaseVectorEnv:
         the given id, either an int or a list.
         """
         self._assert_is_not_closed()
-        env_id = self._wrap_id(env_id)
+        id = self._wrap_id(id)
         if self.is_async:
-            self._assert_id(env_id)
+            self._assert_id(id)
 
         # send(None) == reset() in worker
-        for id in env_id:
-            self.workers[id].send(None, **kwargs)
-        ret_list = [self.workers[id].recv() for id in env_id]
+        for i in id:
+            self.workers[i].send(None, **kwargs)
+        ret_list = [self.workers[i].recv() for i in id]
 
         assert (
             isinstance(ret_list[0], tuple | list)
@@ -231,12 +229,12 @@ class BaseVectorEnv:
         except ValueError:  # different len(obs)
             obs = np.array(obs_list, dtype=object)
 
-        infos = np.array([r[1] for r in ret_list])
-        return obs, infos
+        infos = [r[1] for r in ret_list]
+        return obs, infos  # type: ignore
 
     def step(
         self,
-        action: np.ndarray | torch.Tensor | None,
+        action: np.ndarray | torch.Tensor,
         id: int | list[int] | np.ndarray | None = None,
     ) -> gym_new_venv_step_type:
         """Run one timestep of some environments' dynamics.
@@ -250,8 +248,6 @@ class BaseVectorEnv:
         batch_done, batch_info) in numpy format.
 
         :param numpy.ndarray action: a batch of action provided by the agent.
-            If the venv is async, the action can be None, which will result
-            in all arrays in the returned tuple being empty.
 
         :return: A tuple consisting of either:
 
@@ -275,9 +271,7 @@ class BaseVectorEnv:
         self._assert_is_not_closed()
         id = self._wrap_id(id)
         if not self.is_async:
-            if action is None:
-                raise ValueError("action must be not-None for non-async")
-            assert len(action) == len(id)
+            assert len(action) == len(id)            
             for i, j in enumerate(id):
                 self.workers[j].send(action[i])
             result = []

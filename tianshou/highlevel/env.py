@@ -1,5 +1,4 @@
 import logging
-import platform
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from enum import Enum
@@ -8,8 +7,6 @@ from typing import Any, TypeAlias, cast
 import gymnasium as gym
 import gymnasium.spaces
 from gymnasium import Env
-from sensai.util.pickle import setstate
-from sensai.util.string import ToStringMixin
 
 from tianshou.env import (
     BaseVectorEnv,
@@ -19,6 +16,7 @@ from tianshou.env import (
 )
 from tianshou.highlevel.persistence import Persistence
 from tianshou.utils.net.common import TActionShape
+from tianshou.utils.string import ToStringMixin
 
 TObservationShape: TypeAlias = int | Sequence[int]
 
@@ -68,15 +66,13 @@ class VectorEnvType(Enum):
     """Vectorized environment without parallelization; environments are processed sequentially"""
     SUBPROC = "subproc"
     """Parallelization based on `subprocess`"""
-    SUBPROC_SHARED_MEM_DEFAULT_CONTEXT = "shmem"
+    SUBPROC_SHARED_MEM = "shmem"
     """Parallelization based on `subprocess` with shared memory"""
     SUBPROC_SHARED_MEM_FORK_CONTEXT = "shmem_fork"
     """Parallelization based on `subprocess` with shared memory and fork context (relevant for macOS, which uses `spawn`
      by default https://docs.python.org/3/library/multiprocessing.html#contexts-and-start-methods)"""
     RAY = "ray"
     """Parallelization based on the `ray` library"""
-    SUBPROC_SHARED_MEM_AUTO = "subproc_shared_mem_auto"
-    """Parallelization based on `subprocess` with shared memory, using default context on windows and fork context otherwise"""
 
     def create_venv(
         self,
@@ -87,16 +83,10 @@ class VectorEnvType(Enum):
                 return DummyVectorEnv(factories)
             case VectorEnvType.SUBPROC:
                 return SubprocVectorEnv(factories)
-            case VectorEnvType.SUBPROC_SHARED_MEM_DEFAULT_CONTEXT:
+            case VectorEnvType.SUBPROC_SHARED_MEM:
                 return SubprocVectorEnv(factories, share_memory=True)
             case VectorEnvType.SUBPROC_SHARED_MEM_FORK_CONTEXT:
                 return SubprocVectorEnv(factories, share_memory=True, context="fork")
-            case VectorEnvType.SUBPROC_SHARED_MEM_AUTO:
-                if platform.system().lower() == "windows":
-                    selected_venv_type = VectorEnvType.SUBPROC_SHARED_MEM_DEFAULT_CONTEXT
-                else:
-                    selected_venv_type = VectorEnvType.SUBPROC_SHARED_MEM_FORK_CONTEXT
-                return selected_venv_type.create_venv(factories)
             case VectorEnvType.RAY:
                 return RayVectorEnv(factories)
             case _:
@@ -362,11 +352,11 @@ class EnvPoolFactory:
 
 
 class EnvFactory(ToStringMixin, ABC):
-    def __init__(self, venv_type: VectorEnvType):
-        """Main interface for the creation of environments (in various forms).
+    """Main interface for the creation of environments (in various forms)."""
 
-        :param venv_type: the type of vectorized environment to use for train and test environments.
-            `WATCH` environments are always created as `DUMMY` vector environments.
+    def __init__(self, venv_type: VectorEnvType):
+        """:param venv_type: the type of vectorized environment to use for train and test environments.
+        watch environments are always created as dummy environments.
         """
         self.venv_type = venv_type
 
@@ -378,8 +368,7 @@ class EnvFactory(ToStringMixin, ABC):
         """Create vectorized environments.
 
         :param num_envs: the number of environments
-        :param mode: the mode for which to create.
-            In `WATCH` mode the resulting venv will always be of type `DUMMY` with a single env.
+        :param mode: the mode for which to create. In `WATCH` mode the resulting venv will always be of type `DUMMY` with a single env.
 
         :return: the vectorized environments
         """
@@ -423,8 +412,7 @@ class EnvFactoryRegistered(EnvFactory):
         self,
         *,
         task: str,
-        train_seed: int,
-        test_seed: int,
+        seed: int,
         venv_type: VectorEnvType,
         envpool_factory: EnvPoolFactory | None = None,
         render_mode_train: str | None = None,
@@ -439,32 +427,20 @@ class EnvFactoryRegistered(EnvFactory):
         :param render_mode_train: the render mode to use for training environments
         :param render_mode_test: the render mode to use for test environments
         :param render_mode_watch: the render mode to use for environments that are used to watch agent performance
-        :param make_kwargs: additional keyword arguments to pass on to `gymnasium.make`. If envpool is used, the gymnasium parameters will be appropriately translated for use with `envpool.make_gymnasium`.
+        :param make_kwargs: additional keyword arguments to pass on to `gymnasium.make`.
+            If envpool is used, the gymnasium parameters will be appropriately translated for use with
+            `envpool.make_gymnasium`.
         """
         super().__init__(venv_type)
         self.task = task
         self.envpool_factory = envpool_factory
-        self.train_seed = train_seed
-        self.test_seed = test_seed
+        self.seed = seed
         self.render_modes = {
             EnvMode.TRAIN: render_mode_train,
             EnvMode.TEST: render_mode_test,
             EnvMode.WATCH: render_mode_watch,
         }
         self.make_kwargs = make_kwargs
-
-    def __setstate__(self, state: dict) -> None:
-        if "seed" in state:
-            if "test_seed" in state or "train_seed" in state:
-                raise RuntimeError(
-                    f"Cannot have both 'seed' and 'test_seed'/'train_seed' in state. "
-                    f"Something went wrong during serialization/deserialization: "
-                    f"{state=}",
-                )
-            state["test_seed"] = state["seed"]
-            state["train_seed"] = state["seed"]
-            del state["seed"]
-        setstate(EnvFactoryRegistered, self, state)
 
     def _create_kwargs(self, mode: EnvMode) -> dict:
         """Adapts the keyword arguments for the given mode.
@@ -486,16 +462,15 @@ class EnvFactoryRegistered(EnvFactory):
         return gymnasium.make(self.task, **kwargs)
 
     def create_venv(self, num_envs: int, mode: EnvMode) -> BaseVectorEnv:
-        seed = self.train_seed if mode == EnvMode.TRAIN else self.test_seed
         if self.envpool_factory is not None:
             return self.envpool_factory.create_venv(
                 self.task,
                 num_envs,
                 mode,
-                seed,
+                self.seed,
                 self._create_kwargs(mode),
             )
         else:
             venv = super().create_venv(num_envs, mode)
-            venv.seed(seed)
+            venv.seed(self.seed)
             return venv

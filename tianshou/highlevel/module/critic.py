@@ -2,7 +2,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
 import numpy as np
-from sensai.util.string import ToStringMixin
 from torch import nn
 
 from tianshou.highlevel.env import Environments, EnvType
@@ -12,6 +11,7 @@ from tianshou.highlevel.module.module_opt import ModuleOpt
 from tianshou.highlevel.optim import OptimizerFactory
 from tianshou.utils.net import continuous, discrete
 from tianshou.utils.net.common import BaseActor, EnsembleLinear, ModuleType, Net
+from tianshou.utils.string import ToStringMixin
 
 
 class CriticFactory(ToStringMixin, ABC):
@@ -120,7 +120,7 @@ class CriticFactoryContinuousNet(CriticFactory):
     ) -> nn.Module:
         action_shape = envs.get_action_shape() if use_action else 0
         net_c = Net(
-            state_shape=envs.get_observation_shape(),
+            envs.get_observation_shape(),
             action_shape=action_shape,
             hidden_sizes=self.hidden_sizes,
             concat=use_action,
@@ -146,7 +146,7 @@ class CriticFactoryDiscreteNet(CriticFactory):
     ) -> nn.Module:
         action_shape = envs.get_action_shape() if use_action else 0
         net_c = Net(
-            state_shape=envs.get_observation_shape(),
+            envs.get_observation_shape(),
             action_shape=action_shape,
             hidden_sizes=self.hidden_sizes,
             concat=use_action,
@@ -165,12 +165,6 @@ class CriticFactoryReuseActor(CriticFactory):
     """A critic factory which reuses the actor's preprocessing component.
 
     This class is for internal use in experiment builders only.
-
-    Reuse of the actor network is supported through the concept of an actor future (:class:`ActorFuture`).
-    When the user declares that he wants to reuse the actor for the critic, we use this factory to support this,
-    but the actor does not exist yet. So the factory instead receives the future, which will eventually be filled
-    when the actor factory is called. When the creation method of this factory is eventually called, it can use the
-    then-filled actor to create the critic.
     """
 
     def __init__(self, actor_future: ActorFuture):
@@ -203,11 +197,7 @@ class CriticFactoryReuseActor(CriticFactory):
                 last_size=last_size,
             ).to(device)
         elif envs.get_type().is_continuous():
-            return continuous.Critic(
-                actor.get_preprocess_net(),
-                device=device,
-                apply_preprocess_net_to_obs_only=True,
-            ).to(device)
+            return continuous.Critic(actor.get_preprocess_net(), device=device).to(device)
         else:
             raise ValueError
 
@@ -285,7 +275,7 @@ class CriticEnsembleFactoryContinuousNet(CriticEnsembleFactory):
 
         action_shape = envs.get_action_shape() if use_action else 0
         net_c = Net(
-            state_shape=envs.get_observation_shape(),
+            envs.get_observation_shape(),
             action_shape=action_shape,
             hidden_sizes=self.hidden_sizes,
             concat=use_action,

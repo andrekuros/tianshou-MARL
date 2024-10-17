@@ -1,18 +1,15 @@
 import argparse
 import contextlib
-import logging
 import os
 from collections.abc import Callable
 
 from torch.utils.tensorboard import SummaryWriter
 
 from tianshou.utils import BaseLogger, TensorboardLogger
-from tianshou.utils.logger.base import VALID_LOG_VALS_TYPE, TRestoredData
+from tianshou.utils.logger.base import VALID_LOG_VALS_TYPE
 
 with contextlib.suppress(ImportError):
     import wandb
-
-log = logging.getLogger(__name__)
 
 
 class WandbLogger(BaseLogger):
@@ -57,12 +54,8 @@ class WandbLogger(BaseLogger):
         name: str | None = None,
         entity: str | None = None,
         run_id: str | None = None,
-        group: str | None = None,
-        job_type: str | None = None,
         config: argparse.Namespace | dict | None = None,
         monitor_gym: bool = True,
-        disable_stats: bool = False,
-        log_dir: str | None = None,
     ) -> None:
         super().__init__(train_interval, test_interval, update_interval, info_interval)
         self.last_save_step = -1
@@ -75,33 +68,19 @@ class WandbLogger(BaseLogger):
         self.wandb_run = (
             wandb.init(
                 project=project,
-                group=group,
-                job_type=job_type,
                 name=name,
                 id=run_id,
                 resume="allow",
                 entity=entity,
                 sync_tensorboard=True,
-                # monitor_gym=monitor_gym,  # currently disabled until gymnasium version is bumped to >1.0.0 https://github.com/wandb/wandb/issues/7047
-                dir=log_dir,
+                monitor_gym=monitor_gym,
                 config=config,  # type: ignore
-                settings=wandb.Settings(_disable_stats=disable_stats),
             )
             if not wandb.run
             else wandb.run
         )
-        # TODO: don't access private attribute!
         self.wandb_run._label(repo="tianshou")  # type: ignore
         self.tensorboard_logger: TensorboardLogger | None = None
-        self.writer: SummaryWriter | None = None
-
-    def prepare_dict_for_logging(self, log_data: dict) -> dict[str, VALID_LOG_VALS_TYPE]:
-        if self.tensorboard_logger is None:
-            raise Exception(
-                "`logger` needs to load the Tensorboard Writer before "
-                "preparing data for logging. Try `logger.load(SummaryWriter(log_path))`",
-            )
-        return self.tensorboard_logger.prepare_dict_for_logging(log_data)
 
     def load(self, writer: SummaryWriter) -> None:
         self.writer = writer
@@ -114,19 +93,18 @@ class WandbLogger(BaseLogger):
             self.write_flush,
         )
 
-    def write(self, step_type: str, step: int, data: dict[str, VALID_LOG_VALS_TYPE]) -> None:
-        if self.tensorboard_logger is None:
-            raise RuntimeError(
-                "`logger` needs to load the Tensorboard Writer before "
-                "writing data. Try `logger.load(SummaryWriter(log_path))`",
-            )
-        self.tensorboard_logger.write(step_type, step, data)
-
-    def finalize(self) -> None:
-        if self.wandb_run is not None:
-            self.wandb_run.finish()
-        if self.tensorboard_logger is not None:
-            self.tensorboard_logger.finalize()
+    # def write(self, step_type: str, step: int, data: dict[str, VALID_LOG_VALS_TYPE]) -> None:
+    #     if self.tensorboard_logger is None:
+    #         raise Exception(
+    #             "`logger` needs to load the Tensorboard Writer before "
+    #             "writing data. Try `logger.load(SummaryWriter(log_path))`",
+    #         )
+    #     self.tensorboard_logger.write(step_type, step, data)
+        
+    def write(self, step_type: str, step: int, data) -> None:
+        data[step_type] = step
+        wandb.log(data)   
+         #WandbLogger.write = new_write 
 
     def save_data(
         self,
@@ -183,11 +161,3 @@ class WandbLogger(BaseLogger):
         except KeyError:
             env_step = 0
         return epoch, env_step, gradient_step
-
-    @staticmethod
-    def restore_logged_data(log_path: str) -> TRestoredData:
-        log.warning(
-            "Logging data directly from W&B is not yet implemented, will use the "
-            "TensorboardLogger to restore it from disc instead.",
-        )
-        return TensorboardLogger.restore_logged_data(log_path)

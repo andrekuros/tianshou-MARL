@@ -12,10 +12,7 @@ from tianshou.data import Batch, ReplayBuffer, SequenceSummaryStats
 from tianshou.data.types import BatchWithAdvantagesProtocol, RolloutBatchProtocol
 from tianshou.policy import A2CPolicy
 from tianshou.policy.base import TLearningRateScheduler, TrainingStats
-from tianshou.policy.modelfree.pg import TDistFnDiscrOrCont
-from tianshou.utils.net.continuous import ActorProb, Critic
-from tianshou.utils.net.discrete import Actor as DiscreteActor
-from tianshou.utils.net.discrete import Critic as DiscreteCritic
+from tianshou.policy.modelfree.pg import TDistributionFunction
 
 
 @dataclass(kw_only=True)
@@ -34,9 +31,7 @@ class NPGPolicy(A2CPolicy[TNPGTrainingStats], Generic[TNPGTrainingStats]):  # ty
 
     https://proceedings.neurips.cc/paper/2001/file/4b86abe48d358ecf194c56c69108433e-Paper.pdf
 
-    :param actor: the actor network following the rules:
-        If `self.action_type == "discrete"`: (`s` ->`action_values_BA`).
-        If `self.action_type == "continuous"`: (`s` -> `dist_input_BD`).
+    :param actor: the actor network following the rules in BasePolicy. (s -> logits)
     :param critic: the critic network. (s -> V(s))
     :param optim: the optimizer for actor and critic network.
     :param dist_fn: distribution class for computing the action.
@@ -60,10 +55,10 @@ class NPGPolicy(A2CPolicy[TNPGTrainingStats], Generic[TNPGTrainingStats]):  # ty
     def __init__(
         self,
         *,
-        actor: torch.nn.Module | ActorProb | DiscreteActor,
-        critic: torch.nn.Module | Critic | DiscreteCritic,
+        actor: torch.nn.Module,
+        critic: torch.nn.Module,
         optim: torch.optim.Optimizer,
-        dist_fn: TDistFnDiscrOrCont,
+        dist_fn: TDistributionFunction,
         action_space: gym.Space,
         optim_critic_iters: int = 5,
         actor_step_size: float = 0.5,

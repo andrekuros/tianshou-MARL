@@ -10,24 +10,20 @@ import numpy as np
 import torch
 from gymnasium.spaces import Box, Discrete, MultiBinary, MultiDiscrete
 from numba import njit
-from numpy.typing import ArrayLike
 from overrides import override
 from torch import nn
 
 from tianshou.data import ReplayBuffer, SequenceSummaryStats, to_numpy, to_torch_as
-from tianshou.data.batch import Batch, BatchProtocol, TArr
+from tianshou.data.batch import Batch, BatchProtocol, arr_type
 from tianshou.data.buffer.base import TBuffer
 from tianshou.data.types import (
     ActBatchProtocol,
-    ActStateBatchProtocol,
     BatchWithReturnsProtocol,
     ObsBatchProtocol,
     RolloutBatchProtocol,
 )
 from tianshou.utils import MultipleLRSchedulers
-from tianshou.utils.net.common import RandomActor
 from tianshou.utils.print import DataclassPPrintMixin
-from tianshou.utils.torch_utils import policy_within_training_step, torch_train_mode
 
 logger = logging.getLogger(__name__)
 
@@ -217,43 +213,17 @@ class BasePolicy(nn.Module, Generic[TTrainingStats], ABC):
         self.observation_space = observation_space
         self.action_space = action_space
         if isinstance(action_space, Discrete | MultiDiscrete | MultiBinary):
-            action_type = "discrete"
+            self.action_type = "discrete"
         elif isinstance(action_space, Box):
-            action_type = "continuous"
+            self.action_type = "continuous"
         else:
             raise ValueError(f"Unsupported action space: {action_space}.")
-        self._action_type = cast(Literal["discrete", "continuous"], action_type)
         self.agent_id = 0
         self.updating = False
         self.action_scaling = action_scaling
         self.action_bound_method = action_bound_method
         self.lr_scheduler = lr_scheduler
-        self.is_within_training_step = False
-        """
-        flag indicating whether we are currently within a training step,
-        which encompasses data collection for training (in online RL algorithms)
-        and the policy update (gradient steps).
-
-        It can be used, for example, to control whether a flag controlling deterministic evaluation should
-        indeed be applied, because within a training step, we typically always want to apply stochastic evaluation
-        (even if such a flag is enabled), as well as stochastic action computation for q-targets (e.g. in SAC
-        based algorithms).
-
-        This flag should normally remain False and should be set to True only by the algorithm which performs
-        training steps. This is done automatically by the Trainer classes. If a policy is used outside of a Trainer,
-        the user should ensure that this flag is set correctly before calling update or learn.
-        """
         self._compile()
-
-    def __setstate__(self, state: dict[str, Any]) -> None:
-        # TODO Use setstate function once merged
-        if "is_within_training_step" not in state:
-            state["is_within_training_step"] = False
-        self.__dict__ = state
-
-    @property
-    def action_type(self) -> Literal["discrete", "continuous"]:
-        return self._action_type
 
     def set_agent_id(self, agent_id: int) -> None:
         """Set self.agent_id = agent_id, for MARL."""
@@ -263,14 +233,11 @@ class BasePolicy(nn.Module, Generic[TTrainingStats], ABC):
     #  have a method to add noise to action.
     #  So we add the default behavior here. It's a little messy, maybe one can
     #  find a better way to do this.
-
-    _TArrOrActBatch = TypeVar("_TArrOrActBatch", bound="np.ndarray | ActBatchProtocol")
-
     def exploration_noise(
         self,
-        act: _TArrOrActBatch,
-        batch: ObsBatchProtocol,
-    ) -> _TArrOrActBatch:
+        act: np.ndarray | BatchProtocol,
+        batch: RolloutBatchProtocol,
+    ) -> np.ndarray | BatchProtocol:
         """Modify the action from policy.forward with exploration noise.
 
         NOTE: currently does not add any noise! Needs to be overridden by subclasses
@@ -291,7 +258,7 @@ class BasePolicy(nn.Module, Generic[TTrainingStats], ABC):
 
     def compute_action(
         self,
-        obs: ArrayLike,
+        obs: arr_type,
         info: dict[str, Any] | None = None,
         state: dict | BatchProtocol | np.ndarray | None = None,
     ) -> np.ndarray | int:
@@ -302,8 +269,8 @@ class BasePolicy(nn.Module, Generic[TTrainingStats], ABC):
         :param state: the hidden state of RNN policy, used for recurrent policy.
         :return: action as int (for discrete env's) or array (for continuous ones).
         """
-        obs = np.array(obs)  # convert array-like to array (e.g. LazyFrames)
-        obs = obs[None, :]  # add batch dimension
+        # need to add empty batch dimension
+        obs = obs[None, :]
         obs_batch = cast(ObsBatchProtocol, Batch(obs=obs, info=info))
         act = self.forward(obs_batch, state=state).act.squeeze()
         if isinstance(act, torch.Tensor):
@@ -320,14 +287,14 @@ class BasePolicy(nn.Module, Generic[TTrainingStats], ABC):
         batch: ObsBatchProtocol,
         state: dict | BatchProtocol | np.ndarray | None = None,
         **kwargs: Any,
-    ) -> ActBatchProtocol | ActStateBatchProtocol:  # TODO: make consistent typing
+    ) -> ActBatchProtocol:
         """Compute action over the given batch data.
 
         :return: A :class:`~tianshou.data.Batch` which MUST have the following keys:
 
-            * ``act`` a numpy.ndarray or a torch.Tensor, the action over \
+            * ``act`` an numpy.ndarray or a torch.Tensor, the action over \
                 given batch data.
-            * ``state`` a dict, a numpy.ndarray or a torch.Tensor, the \
+            * ``state`` a dict, an numpy.ndarray or a torch.Tensor, the \
                 internal state of the policy, ``None`` as default.
 
         Other keys are user-defined. It depends on the algorithm. For example,
@@ -356,7 +323,7 @@ class BasePolicy(nn.Module, Generic[TTrainingStats], ABC):
         """
 
     @staticmethod
-    def _action_to_numpy(act: TArr) -> np.ndarray:
+    def _action_to_numpy(act: arr_type) -> np.ndarray:
         act = to_numpy(act)  # NOTE: to_numpy could confusingly also return a Batch
         if not isinstance(act, np.ndarray):
             raise ValueError(
@@ -366,7 +333,7 @@ class BasePolicy(nn.Module, Generic[TTrainingStats], ABC):
 
     def map_action(
         self,
-        act: TArr,
+        act: arr_type,
     ) -> np.ndarray:
         """Map raw network output to action range in gym's env.action_space.
 
@@ -401,7 +368,7 @@ class BasePolicy(nn.Module, Generic[TTrainingStats], ABC):
 
     def map_action_inverse(
         self,
-        act: TArr,
+        act: arr_type,
     ) -> np.ndarray:
         """Inverse operation to :meth:`~tianshou.policy.BasePolicy.map_action`.
 
@@ -529,22 +496,13 @@ class BasePolicy(nn.Module, Generic[TTrainingStats], ABC):
         """
         # TODO: when does this happen?
         # -> this happens never in practice as update is either called with a collector buffer or an assert before
-
-        if not self.is_within_training_step:
-            raise RuntimeError(
-                f"update() was called outside of a training step as signalled by {self.is_within_training_step=} "
-                f"If you want to update the policy without a Trainer, you will have to manage the above-mentioned "
-                f"flag yourself. You can to this e.g., by using the contextmanager {policy_within_training_step.__name__}.",
-            )
-
         if buffer is None:
             return TrainingStats()  # type: ignore[return-value]
         start_time = time.time()
         batch, indices = buffer.sample(sample_size)
         self.updating = True
         batch = self.process_fn(batch, buffer, indices)
-        with torch_train_mode(self):
-            training_stat = self.learn(batch, **kwargs)
+        training_stat = self.learn(batch, **kwargs)
         self.post_process_fn(batch, buffer, indices)
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
@@ -589,23 +547,19 @@ class BasePolicy(nn.Module, Generic[TTrainingStats], ABC):
         advantage + value, which is exactly equivalent to using :math:`TD(\lambda)`
         for estimating returns.
 
-        Setting `v_s_` and `v_s` to None (or all zeros) and `gae_lambda` to 1.0 calculates the
-        discounted return-to-go/ Monte-Carlo return.
-
         :param batch: a data batch which contains several episodes of data in
             sequential order. Mind that the end of each finished episode of batch
             should be marked by done flag, unfinished (or collecting) episodes will be
             recognized by buffer.unfinished_index().
         :param buffer: the corresponding replay buffer.
-        :param indices: tells the batch's location in buffer, batch is equal
+        :param numpy.ndarray indices: tell batch's location in buffer, batch is equal
             to buffer[indices].
-        :param v_s_: the value function of all next states :math:`V(s')`.
+        :param np.ndarray v_s_: the value function of all next states :math:`V(s')`.
             If None, it will be set to an array of 0.
-        :param v_s: the value function of all current states :math:`V(s)`. If None,
-            it is set based upon `v_s_` rolled by 1.
-        :param gamma: the discount factor, should be in [0, 1].
+        :param v_s: the value function of all current states :math:`V(s)`.
+        :param gamma: the discount factor, should be in [0, 1]. Default to 0.99.
         :param gae_lambda: the parameter for Generalized Advantage Estimation,
-            should be in [0, 1].
+            should be in [0, 1]. Default to 0.95.
 
         :return: two numpy arrays (returns, advantage) with each shape (bsz, ).
         """
@@ -649,10 +603,10 @@ class BasePolicy(nn.Module, Generic[TTrainingStats], ABC):
         :param indices: tell batch's location in buffer
         :param function target_q_fn: a function which compute target Q value
             of "obs_next" given data buffer and wanted indices.
-        :param gamma: the discount factor, should be in [0, 1].
+        :param gamma: the discount factor, should be in [0, 1]. Default to 0.99.
         :param n_step: the number of estimation step, should be an int greater
-            than 0.
-        :param rew_norm: normalize the reward to Normal(0, 1).
+            than 0. Default to 1.
+        :param rew_norm: normalize the reward to Normal(0, 1), Default to False.
             TODO: passing True is not supported and will cause an error!
         :return: a Batch. The result will be stored in batch.returns as a
             torch.Tensor with the same shape as target_q_fn's return tensor.
@@ -661,63 +615,26 @@ class BasePolicy(nn.Module, Generic[TTrainingStats], ABC):
         if len(indices) != len(batch):
             raise ValueError(f"Batch size {len(batch)} and indices size {len(indices)} mismatch.")
 
-        # naming convention
-        #  I = number of indices
-        #  B = size of the replay buffer
-        #  N = n_step
-        #  A = the output dimension of target_q_fn for a single index. Presumably
-        #      this is the number of actions in the discrete case, or something like that.
-        #  1 = 1 extra dimension
-        #  TODO: it's very weird that this is not always one!
-        #   We set the n-step-return for a single index to be the same shape as the target_q_fn.
-        #   I don't understand how a non-scalar value would make sense there, but such cases are covered by tests
-
-        # support in following naming convention
-        I = len(indices)
-        N = n_step
-
-        _indices_to_stack = [indices]
-        for _ in range(N - 1):
-            next_indices = buffer.next(_indices_to_stack[-1])
-            _indices_to_stack.append(next_indices)
-        stacked_indices_NI = np.stack(_indices_to_stack)
-        """The stacked indices represent a 2d array of shape `IxN` of the type
-        [
-         [i_1, i_2,...],
-         [i_(next(1)), i_(next(2)), ...],
-         [i_(next(next(1)), ...
-         ...
-        ]
-        where `next` is the subsequent transition in the buffer.
-        """
-        indices_after_n_steps_I = stacked_indices_NI[-1]
-        """Indicates indexes of transitions in buffer that occur N steps after the user provided 'indices';
-        they are truncated at the end of each episode"""
-
+        rew = buffer.rew
+        bsz = len(indices)
+        indices = [indices]
+        for _ in range(n_step - 1):
+            indices.append(buffer.next(indices[-1]))
+        indices = np.stack(indices)
+        # terminal indicates buffer indexes nstep after 'indices',
+        # and are truncated at the end of each episode
+        terminal = indices[-1]
         with torch.no_grad():
-            target_q_torch_IA = target_q_fn(buffer, indices_after_n_steps_I)
-        target_q_IA = to_numpy(target_q_torch_IA.reshape(I, -1))
-        """Represents the Q-values (one for each action) of the transition after N steps."""
+            target_q_torch = target_q_fn(buffer, terminal)  # (bsz, ?)
+        target_q = to_numpy(target_q_torch.reshape(bsz, -1))
+        target_q = target_q * BasePolicy.value_mask(buffer, terminal).reshape(-1, 1)
+        end_flag = buffer.done.copy()
+        end_flag[buffer.unfinished_index()] = True
+        target_q = _nstep_return(rew, end_flag, target_q, indices, gamma, n_step)
 
-        target_q_IA *= BasePolicy.value_mask(buffer, indices_after_n_steps_I).reshape(-1, 1)
-        end_flag_B = buffer.done.copy()
-        end_flag_B[buffer.unfinished_index()] = True
-        n_step_return_IA = _nstep_return(
-            buffer.rew,
-            end_flag_B,
-            target_q_IA,
-            stacked_indices_NI,
-            gamma,
-            n_step,
-        )
-        """The n-step return plus the last Q-values, see method's docstring"""
-
-        batch.returns = to_torch_as(n_step_return_IA, target_q_torch_IA)
-
-        # TODO: this is simply casting to a certain type. Why is this necessary, and why is it happening here?
-        if hasattr(batch, "weight"):
-            batch.weight = to_torch_as(batch.weight, target_q_torch_IA)
-
+        batch.returns = to_torch_as(target_q, target_q_torch)
+        if hasattr(batch, "weight"):  # prio buffer update
+            batch.weight = to_torch_as(batch.weight, target_q_torch)
         return cast(BatchWithReturnsProtocol, batch)
 
     @staticmethod
@@ -729,31 +646,6 @@ class BasePolicy(nn.Module, Generic[TTrainingStats], ABC):
         _gae_return(f64, f64, f64, b, 0.1, 0.1)
         _gae_return(f32, f32, f64, b, 0.1, 0.1)
         _nstep_return(f64, b, f32.reshape(-1, 1), i64, 0.1, 1)
-
-
-class RandomActionPolicy(BasePolicy):
-    def __init__(
-        self,
-        action_space: gym.Space,
-    ) -> None:
-        super().__init__(action_space=action_space)
-        if not isinstance(action_space, gym.spaces.Discrete | gym.spaces.Box):
-            raise NotImplementedError(
-                f"RandomActionPolicy currently only supports Discrete and Box action spaces, but got {action_space}.",
-            )
-        self.actor = RandomActor(action_space)
-
-    def forward(
-        self,
-        batch: ObsBatchProtocol,
-        state: dict | BatchProtocol | np.ndarray | None = None,
-        **kwargs: Any,
-    ) -> ActStateBatchProtocol:
-        act, next_state = self.actor.compute_action_batch(batch.obs), state
-        return cast(ActStateBatchProtocol, Batch(act=act, state=next_state))
-
-    def learn(self, batch: RolloutBatchProtocol, *args: Any, **kwargs: Any) -> TrainingStats:
-        return TrainingStats()
 
 
 # TODO: rename? See docstring
@@ -807,82 +699,27 @@ def _gae_return(
 
 
 @njit
-def episode_mc_return_to_go(rewards: np.ndarray, gamma: float = 0.99) -> np.ndarray:
-    """Calculates discounted monte-carlo returns to go from rewards of a single episode.
-
-    :param rewards: rewards of a single episode. Assumed to be a 1-dim array from reset till the end of the episode.
-    :param gamma: discount factor
-    :return: a numpy array of shape (len(rewards), ).
-    """
-    len_episode = len(rewards)
-    ret2go = np.zeros(len_episode)
-    ret2go[-1] = rewards[-1]
-
-    for j in range(len_episode - 2, -1, -1):
-        ret2go[j] = rewards[j] + gamma * ret2go[j + 1]
-    return ret2go
-
-
-@njit
 def _nstep_return(
-    rew_B: np.ndarray,
-    end_flag_B: np.ndarray,
-    target_q_IA: np.ndarray,
-    stacked_indices_NI: np.ndarray,
+    rew: np.ndarray,
+    end_flag: np.ndarray,
+    target_q: np.ndarray,
+    indices: np.ndarray,
     gamma: float,
     n_step: int,
 ) -> np.ndarray:
-    """Computes n-step returns starting at the transitions at the selected indices in the buffer.
-    Importantly, this is not a pure MC n-step return but it also uses the Q-values of the
-    obs-action pair after the n-step transition to compute the return.
-
-    Thus, it computes `n_step_return + gamma^(n) * Q(s_{t+n}, a_{t+n})` where
-    `n_step_return = r_t + gamma * r_{t+1} + ... + gamma^(n-1) * r_{t+n-1}`.
-    See the docstring of `compute_nstep_return` for more details.
-
-    The target_q_B should be the array of `Q(s_{t+n}, a_{t+n})` corresponding to
-    the batch of rewards that started at t=0.
-
-    Notation:
-    I = number of indices
-    B = size of the replay buffer
-    N = n_step
-    A = the output dimension of target_q_fn for a single index. Presumably,
-        this is the number of actions in the discrete case, or something like that.
-        See comments in the method `compute_nstep_return` for more details.
-    1 = 1 extra dimension
-
-    :param rew_B: rewards of the entire replay buffer
-    :param end_flag_B: end flags (where done=True) of the entire replay buffer
-    :param target_q_IA: Q-values of the transitions after n steps. Passed as a 2d array of shape (I, A)
-    :param stacked_indices_NI: indices of the transitions in the buffer of the structure
-        [
-         [i_1, i_2,...],
-         [i_(next(1)), i_(next(2)), ...],
-         [i_(next(next(1)), ...
-         ...
-        ]
-        where `next` is the subsequent transition in the buffer.
-    """
-    N = n_step
-    I, A = target_q_IA.shape
-    gamma_buffer_N = np.ones(N + 1)
-    for i in range(1, N + 1):
-        gamma_buffer_N[i] = gamma_buffer_N[i - 1] * gamma
-    target_q_IA = target_q_IA.reshape(I, -1)
-    """Make sure tarqet_q_I has an empty extra dimension, usually already passed with the
-    right shape, hence the input param name"""
-    n_step_mc_returns_IA = np.zeros(target_q_IA.shape)
-    """Will hold the n_step MC return part of the final n_step + Q-value return.
-    """
-    gammas_IN = np.full(I, N)
-    for n in range(N - 1, -1, -1):
-        now = stacked_indices_NI[n]
-        gammas_IN[end_flag_B[now] > 0] = n + 1
-        n_step_mc_returns_IA[end_flag_B[now] > 0] = 0.0
-        n_step_mc_returns_IA = rew_B[now].reshape(I, 1) + gamma * n_step_mc_returns_IA
-
-    n_step_return_with_Q_IA = (
-        target_q_IA * gamma_buffer_N[gammas_IN].reshape(I, 1) + n_step_mc_returns_IA
-    )
-    return n_step_return_with_Q_IA.reshape((I, A))
+    gamma_buffer = np.ones(n_step + 1)
+    for i in range(1, n_step + 1):
+        gamma_buffer[i] = gamma_buffer[i - 1] * gamma
+    target_shape = target_q.shape
+    bsz = target_shape[0]
+    # change target_q to 2d array
+    target_q = target_q.reshape(bsz, -1)
+    returns = np.zeros(target_q.shape)
+    gammas = np.full(indices[0].shape, n_step)
+    for n in range(n_step - 1, -1, -1):
+        now = indices[n]
+        gammas[end_flag[now] > 0] = n + 1
+        returns[end_flag[now] > 0] = 0.0
+        returns = rew[now].reshape(bsz, 1) + gamma * returns
+    target_q = target_q * gamma_buffer[gammas].reshape(bsz, 1) + returns
+    return target_q.reshape(target_shape)

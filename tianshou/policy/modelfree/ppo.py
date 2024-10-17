@@ -1,6 +1,5 @@
-from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Generic, Literal, Self, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 import gymnasium as gym
 import numpy as np
@@ -11,11 +10,8 @@ from tianshou.data import ReplayBuffer, SequenceSummaryStats, to_torch_as
 from tianshou.data.types import LogpOldProtocol, RolloutBatchProtocol
 from tianshou.policy import A2CPolicy
 from tianshou.policy.base import TLearningRateScheduler, TrainingStats
-from tianshou.policy.modelfree.pg import TDistFnDiscrOrCont
+from tianshou.policy.modelfree.pg import TDistributionFunction
 from tianshou.utils.net.common import ActorCritic
-from tianshou.utils.net.continuous import ActorProb, Critic
-from tianshou.utils.net.discrete import Actor as DiscreteActor
-from tianshou.utils.net.discrete import Critic as DiscreteCritic
 
 
 @dataclass(kw_only=True)
@@ -24,25 +20,6 @@ class PPOTrainingStats(TrainingStats):
     clip_loss: SequenceSummaryStats
     vf_loss: SequenceSummaryStats
     ent_loss: SequenceSummaryStats
-    gradient_steps: int = 0
-
-    @classmethod
-    def from_sequences(
-        cls,
-        *,
-        losses: Sequence[float],
-        clip_losses: Sequence[float],
-        vf_losses: Sequence[float],
-        ent_losses: Sequence[float],
-        gradient_steps: int = 0,
-    ) -> Self:
-        return cls(
-            loss=SequenceSummaryStats.from_sequence(losses),
-            clip_loss=SequenceSummaryStats.from_sequence(clip_losses),
-            vf_loss=SequenceSummaryStats.from_sequence(vf_losses),
-            ent_loss=SequenceSummaryStats.from_sequence(ent_losses),
-            gradient_steps=gradient_steps,
-        )
 
 
 TPPOTrainingStats = TypeVar("TPPOTrainingStats", bound=PPOTrainingStats)
@@ -52,9 +29,7 @@ TPPOTrainingStats = TypeVar("TPPOTrainingStats", bound=PPOTrainingStats)
 class PPOPolicy(A2CPolicy[TPPOTrainingStats], Generic[TPPOTrainingStats]):  # type: ignore[type-var]
     r"""Implementation of Proximal Policy Optimization. arXiv:1707.06347.
 
-    :param actor: the actor network following the rules:
-        If `self.action_type == "discrete"`: (`s` ->`action_values_BA`).
-        If `self.action_type == "continuous"`: (`s` -> `dist_input_BD`).
+    :param actor: the actor network following the rules in BasePolicy. (s -> logits)
     :param critic: the critic network. (s -> V(s))
     :param optim: the optimizer for actor and critic network.
     :param dist_fn: distribution class for computing the action.
@@ -92,10 +67,10 @@ class PPOPolicy(A2CPolicy[TPPOTrainingStats], Generic[TPPOTrainingStats]):  # ty
     def __init__(
         self,
         *,
-        actor: torch.nn.Module | ActorProb | DiscreteActor,
-        critic: torch.nn.Module | Critic | DiscreteCritic,
+        actor: torch.nn.Module,
+        critic: torch.nn.Module,
         optim: torch.optim.Optimizer,
-        dist_fn: TDistFnDiscrOrCont,
+        dist_fn: TDistributionFunction,
         action_space: gym.Space,
         eps_clip: float = 0.2,
         dual_clip: float | None = None,
@@ -157,11 +132,8 @@ class PPOPolicy(A2CPolicy[TPPOTrainingStats], Generic[TPPOTrainingStats]):  # ty
             self._buffer, self._indices = buffer, indices
         batch = self._compute_returns(batch, buffer, indices)
         batch.act = to_torch_as(batch.act, batch.v_s)
-        logp_old = []
         with torch.no_grad():
-            for minibatch in batch.split(self.max_batchsize, shuffle=False, merge_last=True):
-                logp_old.append(self(minibatch).dist.log_prob(minibatch.act))
-            batch.logp_old = torch.cat(logp_old, dim=0).flatten()
+            batch.logp_old = self(batch).dist.log_prob(batch.act)
         batch: LogpOldProtocol
         return batch
 
@@ -175,27 +147,24 @@ class PPOPolicy(A2CPolicy[TPPOTrainingStats], Generic[TPPOTrainingStats]):  # ty
         **kwargs: Any,
     ) -> TPPOTrainingStats:
         losses, clip_losses, vf_losses, ent_losses = [], [], [], []
-        gradient_steps = 0
         split_batch_size = batch_size or -1
         for step in range(repeat):
             if self.recompute_adv and step > 0:
                 batch = self._compute_returns(batch, self._buffer, self._indices)
             for minibatch in batch.split(split_batch_size, merge_last=True):
-                gradient_steps += 1
                 # calculate loss for actor
-                advantages = minibatch.adv
                 dist = self(minibatch).dist
                 if self.norm_adv:
-                    mean, std = advantages.mean(), advantages.std()
-                    advantages = (advantages - mean) / (std + self._eps)  # per-batch norm
-                ratios = (dist.log_prob(minibatch.act) - minibatch.logp_old).exp().float()
-                ratios = ratios.reshape(ratios.size(0), -1).transpose(0, 1)
-                surr1 = ratios * advantages
-                surr2 = ratios.clamp(1.0 - self.eps_clip, 1.0 + self.eps_clip) * advantages
+                    mean, std = minibatch.adv.mean(), minibatch.adv.std()
+                    minibatch.adv = (minibatch.adv - mean) / (std + self._eps)  # per-batch norm
+                ratio = (dist.log_prob(minibatch.act) - minibatch.logp_old).exp().float()
+                ratio = ratio.reshape(ratio.size(0), -1).transpose(0, 1)
+                surr1 = ratio * minibatch.adv
+                surr2 = ratio.clamp(1.0 - self.eps_clip, 1.0 + self.eps_clip) * minibatch.adv
                 if self.dual_clip:
                     clip1 = torch.min(surr1, surr2)
-                    clip2 = torch.max(clip1, self.dual_clip * advantages)
-                    clip_loss = -torch.where(advantages < 0, clip2, clip1).mean()
+                    clip2 = torch.max(clip1, self.dual_clip * minibatch.adv)
+                    clip_loss = -torch.where(minibatch.adv < 0, clip2, clip1).mean()
                 else:
                     clip_loss = -torch.min(surr1, surr2).mean()
                 # calculate loss for critic
@@ -226,10 +195,14 @@ class PPOPolicy(A2CPolicy[TPPOTrainingStats], Generic[TPPOTrainingStats]):  # ty
                 ent_losses.append(ent_loss.item())
                 losses.append(loss.item())
 
-        return PPOTrainingStats.from_sequences(  # type: ignore[return-value]
-            losses=losses,
-            clip_losses=clip_losses,
-            vf_losses=vf_losses,
-            ent_losses=ent_losses,
-            gradient_steps=gradient_steps,
+        losses_summary = SequenceSummaryStats.from_sequence(losses)
+        clip_losses_summary = SequenceSummaryStats.from_sequence(clip_losses)
+        vf_losses_summary = SequenceSummaryStats.from_sequence(vf_losses)
+        ent_losses_summary = SequenceSummaryStats.from_sequence(ent_losses)
+
+        return PPOTrainingStats(  # type: ignore[return-value]
+            loss=losses_summary,
+            clip_loss=clip_losses_summary,
+            vf_loss=vf_losses_summary,
+            ent_loss=ent_losses_summary,
         )

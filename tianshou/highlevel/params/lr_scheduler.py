@@ -2,10 +2,10 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 import torch
-from sensai.util.string import ToStringMixin
 from torch.optim.lr_scheduler import LambdaLR, LRScheduler
 
 from tianshou.highlevel.config import SamplingConfig
+from tianshou.utils.string import ToStringMixin
 
 
 class LRSchedulerFactory(ToStringMixin, ABC):
@@ -25,7 +25,6 @@ class LRSchedulerFactoryLinear(LRSchedulerFactory):
 
     class _LRLambda:
         def __init__(self, sampling_config: SamplingConfig):
-            assert sampling_config.step_per_collect is not None
             self.max_update_num = (
                 np.ceil(sampling_config.step_per_epoch / sampling_config.step_per_collect)
                 * sampling_config.num_epochs

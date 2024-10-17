@@ -1,11 +1,9 @@
-from collections.abc import Sequence
 from typing import Any, cast
 
 import numpy as np
 import torch
 
 from tianshou.data import ReplayBuffer, SegmentTree, to_numpy
-from tianshou.data.batch import IndexType
 from tianshou.data.types import PrioBatchProtocol, RolloutBatchProtocol
 
 
@@ -55,7 +53,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         self,
         batch: RolloutBatchProtocol,
         buffer_ids: np.ndarray | list[int] | None = None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:        
         ptr, ep_rew, ep_len, ep_idx = super().add(batch, buffer_ids)
         self.init_weight(ptr)
         return ptr, ep_rew, ep_len, ep_idx
@@ -89,8 +87,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         self._max_prio = max(self._max_prio, weight.max())
         self._min_prio = min(self._min_prio, weight.min())
 
-    def __getitem__(self, index: IndexType) -> PrioBatchProtocol:
-        indices: Sequence[int] | np.ndarray
+    def __getitem__(self, index: slice | int | list[int] | np.ndarray) -> PrioBatchProtocol:
         if isinstance(index, slice):  # change slice to np array
             # buffer[:] will get all available data
             indices = (
@@ -99,15 +96,12 @@ class PrioritizedReplayBuffer(ReplayBuffer):
                 else self._indices[: len(self)][index]
             )
         else:
-            indices = cast(np.ndarray, index)
+            indices = index  # type: ignore
         batch = super().__getitem__(indices)
         weight = self.get_weight(indices)
         # ref: https://github.com/Kaixhin/Rainbow/blob/master/memory.py L154
         batch.weight = weight / np.max(weight) if self._weight_norm else weight
         return cast(PrioBatchProtocol, batch)
-
-    def sample(self, batch_size: int | None) -> tuple[PrioBatchProtocol, np.ndarray]:
-        return cast(tuple[PrioBatchProtocol, np.ndarray], super().sample(batch_size=batch_size))
 
     def set_beta(self, beta: float) -> None:
         self._beta = beta

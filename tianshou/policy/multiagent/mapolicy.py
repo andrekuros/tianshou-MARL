@@ -1,13 +1,18 @@
-from typing import Any, Literal, Protocol, Self, TypeVar, cast, overload
+from typing import Any, Literal, Protocol, Self, cast, overload
 
 import numpy as np
 from overrides import override
 
 from tianshou.data import Batch, ReplayBuffer
 from tianshou.data.batch import BatchProtocol, IndexType
-from tianshou.data.types import ActBatchProtocol, ObsBatchProtocol, RolloutBatchProtocol
+from tianshou.data.types import RolloutBatchProtocol
 from tianshou.policy import BasePolicy
 from tianshou.policy.base import TLearningRateScheduler, TrainingStats
+
+import gymnasium as gym
+import numpy as np
+import torch
+from gymnasium.spaces import Box, Discrete, MultiBinary, MultiDiscrete
 
 try:
     from tianshou.env.pettingzoo_env import PettingZooEnv
@@ -116,67 +121,124 @@ class MultiAgentPolicyManager(BasePolicy):
         policy.set_agent_id(agent_id)
         self.policies[agent_id] = policy
 
-    # TODO: violates Liskov substitution principle
+
     def process_fn(  # type: ignore
         self,
         batch: MAPRolloutBatchProtocol,
         buffer: ReplayBuffer,
         indice: np.ndarray,
     ) -> MAPRolloutBatchProtocol:
-        """Dispatch batch data from `obs.agent_id` to every policy's process_fn.
+        """Dispatch batch data to every policy's process_fn.
 
-        Save original multi-dimensional rew in "save_rew", set rew to the
-        reward of each agent during their "process_fn", and restore the
-        original reward afterwards.
+        Save original multi-dimensional rew in "save_rew", set rew to the reward
+        of each agent during their "process_fn", and restore the original reward afterwards.
         """
-        # TODO: maybe only str is actually allowed as agent_id? See MAPRolloutBatchProtocol
+                    
         results: dict[str | int, RolloutBatchProtocol] = {}
         assert isinstance(
             batch.obs,
             BatchProtocol,
         ), f"here only observations of type Batch are permitted, but got {type(batch.obs)}"
-        # reward can be empty Batch (after initial reset) or nparray.
-        has_rew = isinstance(buffer.rew, np.ndarray)
-        if has_rew:  # save the original reward in save_rew
-            # Since we do not override buffer.__setattr__, here we use _meta to
-            # change buffer.rew, otherwise buffer.rew = Batch() has no effect.
-            save_rew, buffer._meta.rew = buffer.rew, Batch()  # type: ignore
-        for agent, policy in self.policies.items():
-            agent_index = np.nonzero(batch.obs.agent_id == agent)[0]
-            if len(agent_index) == 0:
-                results[agent] = cast(RolloutBatchProtocol, Batch())
-                continue
-            tmp_batch, tmp_indice = batch[agent_index], indice[agent_index]
-            if has_rew:
-                tmp_batch.rew = tmp_batch.rew[:, self.agent_idx[agent]]
-                buffer._meta.rew = save_rew[:, self.agent_idx[agent]]
-            if not hasattr(tmp_batch.obs, "mask"):
-                if hasattr(tmp_batch.obs, "obs"):
-                    tmp_batch.obs = tmp_batch.obs.obs
-                if hasattr(tmp_batch.obs_next, "obs"):
-                    tmp_batch.obs_next = tmp_batch.obs_next.obs
-            results[agent] = policy.process_fn(tmp_batch, buffer, tmp_indice)
-        if has_rew:  # restore from save_rew
-            buffer._meta.rew = save_rew
-        return cast(MAPRolloutBatchProtocol, Batch(results))
 
-    _TArrOrActBatch = TypeVar("_TArrOrActBatch", bound="np.ndarray | ActBatchProtocol")
+        # Function to filter buffer for a specific agent
+
+        for agent_id, policy in self.policies.items():
+                                
+
+            
+            # Extract relevant data for the agent
+            agent_batch = Batch(
+                obs=batch.obs[agent_id], 
+                obs_next=batch.obs_next[agent_id], 
+                info=batch.info[agent_id],
+                act=batch.act[agent_id],
+                mask=batch.obs[agent_id].mask,
+                #weight=batch.weight,
+                #rew=batch.rew[:, agent_id] if batch.rew.ndim > 1 else batch.rew,
+                rew=batch.rew,
+                terminated=batch.terminated,
+                truncated=batch.truncated
+            )
+        
+            if not hasattr(agent_batch, "info"):
+                agent_batch.info = Batch()  # Create an empty info attribute if missing
+            
+            buffer.agent_ref = agent_id
+            
+            
+            results[agent_id] = policy.process_fn(agent_batch, buffer, indice)
+
+        return Batch(results)
+
+    # # TODO: violates Liskov substitution principle
+    # def process_fn(  # type: ignore
+    #     self,
+    #     batch: MAPRolloutBatchProtocol,
+    #     buffer: ReplayBuffer,
+    #     indice: np.ndarray,
+    #     ) -> MAPRolloutBatchProtocol:
+    #     """Dispatch batch data to every policy's process_fn.
+
+    #     Save original multi-dimensional rew in "save_rew", set rew to the reward
+    #     of each agent during their "process_fn", and restore the original reward afterwards.
+    #     """
+                
+    #     results: dict[str | int, RolloutBatchProtocol] = {}
+    #     assert isinstance(
+    #         batch.obs,
+    #         BatchProtocol,
+    #     ), f"here only observations of type Batch are permitted, but got {type(batch.obs)}"
+
+    #     # reward can be empty Batch (after initial reset) or nparray.
+    #     #has_rew = isinstance(buffer.rew, np.ndarray)
+                
+    #     for agent_id, policy in self.policies.items():
+                
+    #         print("OBSPROC:", batch)            
+
+    #         agent_batch = Batch(obs=batch.obs[agent_id], 
+    #                             obs_next = batch.obs_next[agent_id], 
+    #                             info=batch.info[agent_id],
+    #                             act=batch.act[agent_id],
+    #                             mask=batch.obs[agent_id].mask,
+    #                             #weight=batch.weight,
+    #                             rew=batch.rew,
+    #                             terminated=batch.terminated,
+    #                             truncated=batch.truncated) 
+           
+    #         if not hasattr(agent_batch, "info"):
+    #             agent_batch.info = Batch()  # Create an empty info attribute if missing
+
+                            
+    #         #if not hasattr(agent_batch.obs, "mask"):
+    #         #    if hasattr(agent_batch.obs, "obs"):
+    #         #        agent_batch.obs = agent_batch.obs.obs  
+
+    #         #agent_batch.obs.agent_id = np.full(len(batch.obs[agent_id]), agent_id) 
+    #         print("BUFFER", buffer)  
+    #         results[agent_id] = policy.process_fn(agent_batch, buffer, indice)        
+    
+    #     #if has_rew:  # restore from save_rew
+    #     #    buffer._meta.rew = save_rew
+    #     return Batch(results)              
+            
 
     def exploration_noise(
         self,
-        act: _TArrOrActBatch,
-        batch: ObsBatchProtocol,
-    ) -> _TArrOrActBatch:
+        act: np.ndarray | BatchProtocol,
+        batch: RolloutBatchProtocol,
+    ) -> np.ndarray | BatchProtocol:
         """Add exploration noise from sub-policy onto act."""
-        if not isinstance(batch.obs, Batch):
-            raise TypeError(
-                f"here only observations of type Batch are permitted, but got {type(batch.obs)}",
-            )
+        assert isinstance(
+            batch.obs,
+            BatchProtocol,
+        ), f"here only observations of type Batch are permitted, but got {type(batch.obs)}"
+        
         for agent_id, policy in self.policies.items():
-            agent_index = np.nonzero(batch.obs.agent_id == agent_id)[0]
-            if len(agent_index) == 0:
-                continue
-            act[agent_index] = policy.exploration_noise(act[agent_index], batch[agent_index])
+            #agent_index = np.nonzero(batch.obs.agent_id == agent_id)[0]
+            #if len(agent_index) == 0:
+            #    continue            
+            act[agent_id] = policy.exploration_noise(act[agent_id], batch.obs[agent_id])
         return act
 
     def forward(  # type: ignore
@@ -185,78 +247,36 @@ class MultiAgentPolicyManager(BasePolicy):
         state: dict | Batch | None = None,
         **kwargs: Any,
     ) -> Batch:
-        """Dispatch batch data from obs.agent_id to every policy's forward.
+        """Dispatch batch data to every policy's forward and return actions for all agents.
 
-        :param batch: TODO: document what is expected at input and make a BatchProtocol for it
+        :param batch: a Batch object containing observations for all agents
         :param state: if None, it means all agents have no state. If not
             None, it should contain keys of "agent_1", "agent_2", ...
 
         :return: a Batch with the following contents:
-            TODO: establish a BatcProtocol for this
-
-        ::
-
             {
-                "act": actions corresponding to the input
-                "state": {
-                    "agent_1": output state of agent_1's policy for the state
-                    "agent_2": xxx
-                    ...
-                    "agent_n": xxx}
-                "out": {
-                    "agent_1": output of agent_1's policy for the input
-                    "agent_2": xxx
-                    ...
-                    "agent_n": xxx}
+                "act": a dictionary mapping agent_id to its corresponding action
+                "state": a dictionary mapping agent_id to its corresponding state (if any)
             }
         """
-        results: list[tuple[bool, np.ndarray, Batch, np.ndarray | Batch, Batch]] = []
+        act_dict, state_dict = {}, {}
         for agent_id, policy in self.policies.items():
-            # This part of code is difficult to understand.
-            # Let's follow an example with two agents
-            # batch.obs.agent_id is [1, 2, 1, 2, 1, 2] (with batch_size == 6)
-            # each agent plays for three transitions
-            # agent_index for agent 1 is [0, 2, 4]
-            # agent_index for agent 2 is [1, 3, 5]
-            # we separate the transition of each agent according to agent_id
-            agent_index = np.nonzero(batch.obs.agent_id == agent_id)[0]
-            if len(agent_index) == 0:
-                # (has_data, agent_index, out, act, state)
-                results.append((False, np.array([-1]), Batch(), Batch(), Batch()))
-                continue
-            tmp_batch = batch[agent_index]
-            if "rew" in tmp_batch.get_keys() and isinstance(tmp_batch.rew, np.ndarray):
-                # reward can be empty Batch (after initial reset) or nparray.
-                tmp_batch.rew = tmp_batch.rew[:, self.agent_idx[agent_id]]
-            if not hasattr(tmp_batch.obs, "mask"):
-                if hasattr(tmp_batch.obs, "obs"):
-                    tmp_batch.obs = tmp_batch.obs.obs
-                if hasattr(tmp_batch.obs_next, "obs"):
-                    tmp_batch.obs_next = tmp_batch.obs_next.obs
+            
+            #print("Before", batch)
+            agent_batch = Batch( obs=batch.obs[agent_id], mask=batch.obs[agent_id].mask, info=batch.info[agent_id])            
+            if not hasattr(agent_batch, "info"):
+                agent_batch.info = Batch()  # Create an empty info attribute if missing
+            
             out = policy(
-                batch=tmp_batch,
-                state=None if state is None else state[agent_id],
+                batch=agent_batch,
+                state=None if (state is None or state.shape == []) else state[agent_id],
                 **kwargs,
             )
-            act = out.act
-            each_state = out.state if (hasattr(out, "state") and out.state is not None) else Batch()
-            results.append((True, agent_index, out, act, each_state))
-        holder: Batch = Batch.cat(
-            [{"act": act} for (has_data, agent_index, out, act, each_state) in results if has_data],
-        )
-        state_dict, out_dict = {}, {}
-        for (agent_id, _), (has_data, agent_index, out, act, state) in zip(
-            self.policies.items(),
-            results,
-            strict=True,
-        ):
-            if has_data:
-                holder.act[agent_index] = act
-            state_dict[agent_id] = state
-            out_dict[agent_id] = out
-        holder["out"] = out_dict
-        holder["state"] = state_dict
-        return holder
+            act_dict[agent_id] = out.act
+            if hasattr(out, "state") and out.state is not None:
+                state_dict[agent_id] = out.state
+
+        return Batch(act=act_dict, state=state_dict)
 
     # Violates Liskov substitution principle
     def learn(  # type: ignore
@@ -269,10 +289,11 @@ class MultiAgentPolicyManager(BasePolicy):
 
         :param batch: must map agent_ids to rollout batches
         """
+        
         agent_id_to_stats = {}
-        for agent_id, policy in self.policies.items():
+        for agent_id, policy in self.policies.items():            
             data = batch[agent_id]
-            if len(data.get_keys()) != 0:
+            if not data.is_empty():                              
                 train_stats = policy.learn(batch=data, **kwargs)
                 agent_id_to_stats[agent_id] = train_stats
         return MapTrainingStats(agent_id_to_stats)
@@ -284,3 +305,56 @@ class MultiAgentPolicyManager(BasePolicy):
         for policy in self.policies.values():
             policy.train(mode)
         return self
+    
+    def map_action(self, act: Batch) -> list:
+        """
+        Map raw network output to action range in gym's env.action_space.
+        This function is called in :meth:`~tianshou.data.Collector.collect` and only affects action sending to env.
+        Remapped action will not be stored in buffer and thus can be viewed as a part of env (a black box action transformation).
+        Action mapping includes 2 standard procedures: bounding and scaling.
+        Bounding procedure expects original action range is (-inf, inf) and maps it to [-1, 1],
+        while scaling procedure expects original action range is (-1, 1) and maps it to [action_space.low, action_space.high].
+        Bounding procedure is applied first.
+
+        :param act: a data batch or numpy.ndarray which is the action taken by policy.forward.
+        :return: action in the form of a list where each position represents an environment and contains a dictionary with the agent ID and the corresponding action data.
+        """
+        processed_act = {}        
+
+        for agent_id, policy in self.policies.items():
+            agent_act = self._action_to_numpy(act[agent_id])
+            if isinstance(self.action_space, gym.spaces.Box):
+                if self.action_bound_method == "clip":
+                    agent_act = np.clip(agent_act, -1.0, 1.0)
+                elif self.action_bound_method == "tanh":
+                    agent_act = np.tanh(agent_act)
+
+                if self.action_scaling:
+                    assert (
+                        np.min(agent_act) >= -1.0 and np.max(agent_act) <= 1.0
+                    ), f"action scaling only accepts raw action range = [-1, 1], but got: {act}"
+                    low, high = self.action_space.low, self.action_space.high
+                    agent_act = low + (high - low) * (agent_act + 1.0) / 2.0
+
+            processed_act[agent_id] = agent_act
+
+        # Get the number of environments
+        num_envs = len(processed_act['agent_0'])
+
+        # Initialize the remapped action list
+        remapped_action = [None] * num_envs
+
+        # Iterate over each environment
+        for env_id in range(num_envs):
+            # Create a dictionary to store the action for each agent in the current environment
+            env_action = {}
+
+            # Iterate over each agent
+            for agent_id, agent_action in processed_act.items():
+                # Add the agent's action to the environment's action dictionary
+                env_action[agent_id] = agent_action[env_id]
+
+            # Assign the environment's action dictionary to the corresponding position in the remapped action list
+            remapped_action[env_id] = env_action
+
+        return remapped_action

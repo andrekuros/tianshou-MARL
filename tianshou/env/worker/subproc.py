@@ -1,8 +1,9 @@
 import ctypes
 import multiprocessing
 import time
+from collections import OrderedDict
 from collections.abc import Callable
-from multiprocessing import connection
+from multiprocessing import Pipe, connection
 from multiprocessing.context import BaseContext
 from typing import Any, Literal
 
@@ -67,6 +68,7 @@ class ShArray:
 
 def _setup_buf(space: gym.Space, ctx: BaseContext) -> dict | tuple | ShArray:
     if isinstance(space, gym.spaces.Dict):
+        assert isinstance(space.spaces, OrderedDict)
         return {k: _setup_buf(v, ctx) for k, v in space.spaces.items()}
     if isinstance(space, gym.spaces.Tuple):
         assert isinstance(space.spaces, tuple)
@@ -124,7 +126,6 @@ def _worker(
                 if hasattr(env, "seed"):
                     p.send(env.seed(data))
                 else:
-                    env.action_space.seed(seed=data)
                     env.reset(seed=data)
                     p.send(None)
             elif cmd == "getattr":
@@ -147,11 +148,11 @@ class SubprocEnvWorker(EnvWorker):
         share_memory: bool = False,
         context: BaseContext | Literal["fork", "spawn"] | None = None,
     ) -> None:
-        if not isinstance(context, BaseContext):
-            context = multiprocessing.get_context(context)
-        self.parent_remote, self.child_remote = context.Pipe()
+        self.parent_remote, self.child_remote = Pipe()
         self.share_memory = share_memory
         self.buffer: dict | tuple | ShArray | None = None
+        if not isinstance(context, BaseContext):
+            context = multiprocessing.get_context(context)
         assert hasattr(context, "Process")  # for mypy
         if self.share_memory:
             dummy = env_fn()
